@@ -16,8 +16,9 @@ struct session {
 
 bool accept(const session& s, const std::array<std::uint8_t, 16>& presented) {
     // Not memcmp: it returns on the first differing byte, and the time it takes
-    // tells an attacker how many bytes they guessed right.
-    return ctsafe::equals(s.tag.data(), presented.data(), s.tag.size());
+    // tells an attacker how many bytes they guessed right. Both spans carry
+    // their own length, so the 16 is never retyped here.
+    return ctsafe::equals(s.tag, presented);
 }
 
 }  // namespace

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "harness.hpp"
 
@@ -46,6 +47,42 @@ void equals_reads_the_whole_buffer_whatever_differs() {
     CHECK(!differs_at(7));
     CHECK(!differs_at(15));
     CHECK(ctsafe::equals(expected.data(), expected.data(), expected.size()));
+}
+
+void equals_over_spans_takes_the_length_from_the_buffer() {
+    const std::array<std::uint8_t, 4> tag{0x01, 0x02, 0x03, 0x04};
+    const std::array<std::uint8_t, 4> same{0x01, 0x02, 0x03, 0x04};
+    const std::array<std::uint8_t, 4> last_byte_differs{0x01, 0x02, 0x03, 0x05};
+    const std::array<std::uint8_t, 4> first_byte_differs{0x00, 0x02, 0x03, 0x04};
+
+    CHECK(ctsafe::equals(tag, same));
+    CHECK(!ctsafe::equals(tag, last_byte_differs));
+    CHECK(!ctsafe::equals(tag, first_byte_differs));
+
+    const std::vector<unsigned char> from_a_vector{0x01, 0x02, 0x03, 0x04};
+    CHECK(ctsafe::equals(tag, from_a_vector));
+
+    const std::string text = "tag";
+    CHECK(ctsafe::equals(text, std::string("tag")));
+    CHECK(!ctsafe::equals(text, std::string("tab")));
+}
+
+// A tag of the wrong size is a structural error, not a guess to protect, so the
+// answer is false rather than a comparison that reads past the shorter buffer.
+void spans_of_different_lengths_are_never_equal() {
+    const std::array<std::uint8_t, 4> shorter{0x01, 0x02, 0x03, 0x04};
+    const std::array<std::uint8_t, 5> longer{0x01, 0x02, 0x03, 0x04, 0x00};
+
+    CHECK(!ctsafe::equals(shorter, longer));
+    CHECK(!ctsafe::equals(longer, shorter));
+}
+
+void a_span_can_be_built_from_the_shapes_a_caller_has() {
+    const std::uint8_t raw[3] = {0xAA, 0xBB, 0xCC};
+
+    CHECK(ctsafe::equals(raw, ctsafe::byte_view(raw, sizeof raw)));
+    CHECK(ctsafe::equals(ctsafe::byte_view(), ctsafe::byte_view(nullptr, 0)));
+    CHECK(ctsafe::byte_view(raw).size() == 3);
 }
 
 void a_zero_length_comparison_is_equal() {
@@ -104,6 +141,9 @@ int main() {
     eq_and_select_are_masks();
     equals_agrees_with_memcmp_on_every_answer();
     equals_reads_the_whole_buffer_whatever_differs();
+    equals_over_spans_takes_the_length_from_the_buffer();
+    spans_of_different_lengths_are_never_equal();
+    a_span_can_be_built_from_the_shapes_a_caller_has();
     a_zero_length_comparison_is_equal();
     is_zero_finds_a_single_set_bit_anywhere();
     erase_zeroes_the_buffer();

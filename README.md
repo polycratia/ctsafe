@@ -41,7 +41,11 @@ key after erase        zero=1
 ```cpp
 #include "ctsafe/ctsafe.hpp"
 
-if (ctsafe::equals(expected_tag, presented_tag, 16)) { /* accept */ }
+// Spans: both lengths travel with the data, so the size is never retyped.
+if (ctsafe::equals(expected_tag, presented_tag)) { /* accept */ }
+
+// Or a pointer and a length, when that is what the caller has.
+if (ctsafe::equals(mac, expected, 16)) { /* accept */ }
 
 ctsafe::erase_object(session);   // size taken from the type, not retyped
 ```
@@ -68,9 +72,12 @@ header's reach. What this gives you is source that does not *ask* the compiler
 to leak, and a barrier that stops the two specific optimisations that break
 these routines.
 
-**The length is not secret.** Buffers of different lengths are a structural
-error, not a guess to protect, so `equals` takes one length and the caller
-checks the sizes.
+**The length is not secret.** The span overload accepts anything with `data()`
+and `size()` — `std::array`, `std::vector`, `std::string`, a C array,
+`std::span` on C++20 — and answers `false` on a size mismatch before a byte is
+read. Buffers of different lengths are a structural error, not a guess to
+protect, and reading the shorter one past its end would be worse than the leak
+being avoided.
 
 **Without inline assembly the barrier weakens.** On compilers other than GCC and
 Clang the `asm` block is unavailable and only the `volatile` stores remain. That
@@ -83,7 +90,7 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`), constant-time `equals` and `is_zero`, non-removable `erase` and `erase_object` |
+| Implemented | byte masks (`eq`, `select`), constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` |
 | Not yet | constant-time integer comparison and conditional swap for bignum code, a `secure_buffer` type that erases in its destructor |
 
 ## Development
@@ -97,3 +104,5 @@ make demo
 ## License
 
 MIT
+
+Maintained by [polycratia](https://polycratia.com).
