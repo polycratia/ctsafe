@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -129,6 +130,30 @@ void erase_survives_a_dead_buffer() {
     CHECK(s.counter == 0);
 }
 
+// is_zero() could in principle be folded into the erase by a compiler that can
+// see both. Reading the bytes back through a volatile pointer cannot be, so
+// this check is answered by memory rather than by constant propagation.
+void erase_is_visible_through_a_volatile_read() {
+    std::array<std::uint8_t, 32> key{};
+    key.fill(0x7E);
+    ctsafe::erase(key.data(), key.size());
+
+    const volatile std::uint8_t* view = key.data();
+    std::uint8_t any = 0;
+    for (std::size_t i = 0; i < key.size(); ++i) any = static_cast<std::uint8_t>(any | view[i]);
+    CHECK(any == 0);
+}
+
+// Which routine did the erasing differs by platform, and so does how much it
+// promises. The suite prints the answer instead of leaving it to be assumed.
+void the_erase_backend_names_itself() {
+    const char* name = ctsafe::erase_backend_name();
+    CHECK(name[0] != '\0');
+    CHECK((ctsafe::erase_backend_used() == ctsafe::erase_backend::volatile_stores) ==
+          (std::strncmp(name, "volatile", 8) == 0));
+    std::printf("erase backend: %s\n", name);
+}
+
 void erase_of_nothing_is_allowed() {
     std::array<std::uint8_t, 1> one{0x11};
     ctsafe::erase(one.data(), 0);
@@ -148,6 +173,8 @@ int main() {
     is_zero_finds_a_single_set_bit_anywhere();
     erase_zeroes_the_buffer();
     erase_survives_a_dead_buffer();
+    erase_is_visible_through_a_volatile_read();
+    the_erase_backend_names_itself();
     erase_of_nothing_is_allowed();
     return harness::report("ctsafe");
 }

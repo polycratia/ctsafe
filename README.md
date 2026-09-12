@@ -33,7 +33,7 @@ wrong in the first     accepted=0
 
 key before erase       zero=0
 key after erase        zero=1
-  (built at -O2, where a plain memset would be free to vanish)
+  (erased with explicit_bzero; at -O2 a plain memset would be free to vanish)
 ```
 
 ## Use
@@ -47,7 +47,8 @@ if (ctsafe::equals(expected_tag, presented_tag)) { /* accept */ }
 // Or a pointer and a length, when that is what the caller has.
 if (ctsafe::equals(mac, expected, 16)) { /* accept */ }
 
-ctsafe::erase_object(session);   // size taken from the type, not retyped
+ctsafe::erase_object(session);     // size taken from the type, not retyped
+ctsafe::erase_backend_name();      // which routine that erase actually called
 ```
 
 Header-only, C++17, no allocation, no exceptions.
@@ -58,10 +59,27 @@ Header-only, C++17, no allocation, no exceptions.
 on the contents, and the accumulated difference passes through a compiler
 barrier so the loop cannot be short-circuited.
 
-**The erasure is emitted.** Stores go through a `volatile` pointer, and a
-barrier afterwards stops the whole loop being treated as dead code. The test
-suite runs at `-O2` as well as under the sanitizers, because an erasure that
-only survives at `-O0` is precisely the bug.
+**The erasure is emitted.** `erase` calls the routine the platform already
+provides for exactly this, and only argues with the optimizer itself when there
+is none:
+
+| Platform | `erase` calls |
+|---|---|
+| Windows | `SecureZeroMemory` |
+| glibc >= 2.25, OpenBSD, FreeBSD | `explicit_bzero` |
+| Annex K available (`__STDC_LIB_EXT1__`) | `memset_s` |
+| anything else | stores through a `volatile` pointer |
+
+Every path ends in a compiler barrier — an empty `asm` block with a memory
+clobber on GCC and Clang, `_ReadWriteBarrier()` on MSVC — so the buffer cannot
+be treated as dead across the call. Which row a build took is reported by
+`ctsafe::erase_backend_name()`, because a guarantee you have to guess at is not
+one. The test suite runs at `-O2` as well as under the sanitizers, because an
+erasure that only survives at `-O0` is precisely the bug.
+
+On Windows the header includes `<windows.h>` to reach `SecureZeroMemory`; define
+`CTSAFE_NO_WINDOWS_H` to keep it out of the translation unit and take the
+fallback instead.
 
 ## What it does not guarantee, stated plainly
 
@@ -79,10 +97,18 @@ read. Buffers of different lengths are a structural error, not a guess to
 protect, and reading the shorter one past its end would be worse than the leak
 being avoided.
 
-**Without inline assembly the barrier weakens.** On compilers other than GCC and
-Clang the `asm` block is unavailable and only the `volatile` stores remain. That
-fallback is deliberate and marked in the source rather than silently pretended
-away.
+**Erasing a buffer does not erase its copies.** No routine in the table above
+reaches a register spill, a block that `realloc` moved, or a page the kernel has
+already written to swap. Erase clears the bytes you name, at the moment you name
+them; keeping the secret from being duplicated in the first place is the
+caller's problem.
+
+**The last row of the table is weaker than the others.** With no platform
+routine and no barrier — a compiler that is neither GCC, Clang nor MSVC — only
+the `volatile` stores remain. A conforming implementation must emit them, but
+nothing else is holding the optimizer back. That fallback is deliberate, named
+by `erase_backend_name()`, and marked in the source rather than silently
+pretended away.
 
 ## Status
 
@@ -90,7 +116,7 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`), constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` |
+| Implemented | byte masks (`eq`, `select`), constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine |
 | Not yet | constant-time integer comparison and conditional swap for bignum code, a `secure_buffer` type that erases in its destructor |
 
 ## Development

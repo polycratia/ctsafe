@@ -42,6 +42,7 @@ int main() {
     std::printf("key before erase       zero=%d\n", ctsafe::is_zero(s.key.data(), s.key.size()));
     ctsafe::erase_object(s);
     std::printf("key after erase        zero=%d\n", ctsafe::is_zero(s.key.data(), s.key.size()));
-    std::printf("  (built at -O2, where a plain memset would be free to vanish)\n");
+    std::printf("  (erased with %s; at -O2 a plain memset would be free to vanish)\n",
+                ctsafe::erase_backend_name());
     return 0;
 }

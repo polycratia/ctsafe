@@ -22,8 +22,44 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <type_traits>
 #include <utility>
+
+// Which barrier is available. GCC and Clang accept an empty asm block with a
+// memory clobber; MSVC has an intrinsic that constrains the optimizer the same
+// way. A compiler with neither is handled, and says so.
+#if defined(__GNUC__) || defined(__clang__)
+#define CTSAFE_BARRIER_ASM 1
+#elif defined(_MSC_VER)
+#define CTSAFE_BARRIER_MSVC 1
+#include <intrin.h>
+#endif
+
+// Which routine erase() calls. Where the platform ships a function for this,
+// that function carries the promise not to be optimized away, and using it is
+// better than arguing with the optimizer from portable code. The last branch is
+// the fallback, and it is named in erase_backend_name() rather than assumed.
+//
+// Defining CTSAFE_NO_WINDOWS_H keeps <windows.h> out of the translation unit at
+// the cost of taking the fallback there.
+#if defined(_WIN32) && !defined(CTSAFE_NO_WINDOWS_H)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#define CTSAFE_ERASE_SECUREZEROMEMORY 1
+#elif defined(__OpenBSD__) || defined(__FreeBSD__) || \
+    (defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25)))
+#define CTSAFE_ERASE_EXPLICIT_BZERO 1
+#elif defined(__STDC_LIB_EXT1__)
+#define CTSAFE_ERASE_MEMSET_S 1
+#else
+#define CTSAFE_ERASE_VOLATILE 1
+#endif
 
 namespace ctsafe {
 
@@ -39,12 +75,15 @@ namespace detail {
 /// read, so it cannot prove a preceding store is dead. This is the same
 /// mechanism the benchmark libraries use to keep a result alive.
 inline void keep(const volatile void* p) noexcept {
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(CTSAFE_BARRIER_ASM)
     asm volatile("" : : "r"(p) : "memory");
+#elif defined(CTSAFE_BARRIER_MSVC)
+    (void)p;
+    _ReadWriteBarrier();
 #else
-    // No inline assembly available. The volatile write in erase() still stands,
-    // which is weaker but not nothing, and the fallback is deliberate rather
-    // than accidental.
+    // Neither an asm block nor an intrinsic. The volatile accesses stand on
+    // their own, which is weaker but not nothing, and the fallback is
+    // deliberate rather than accidental.
     (void)p;
 #endif
 }
@@ -142,14 +181,62 @@ private:
     return any == 0;
 }
 
+/// Which routine erase() ends up calling in this build.
+enum class erase_backend {
+    secure_zero_memory,  ///< Windows, via SecureZeroMemory.
+    explicit_bzero,      ///< glibc >= 2.25, OpenBSD, FreeBSD.
+    memset_s,            ///< C11 Annex K, where the implementation offers it.
+    volatile_stores,     ///< The portable fallback: volatile stores plus a barrier.
+};
+
+/// The backend this build selected. Reported rather than guessed, because the
+/// strength of the guarantee differs between the rows.
+[[nodiscard]] constexpr erase_backend erase_backend_used() noexcept {
+#if defined(CTSAFE_ERASE_SECUREZEROMEMORY)
+    return erase_backend::secure_zero_memory;
+#elif defined(CTSAFE_ERASE_EXPLICIT_BZERO)
+    return erase_backend::explicit_bzero;
+#elif defined(CTSAFE_ERASE_MEMSET_S)
+    return erase_backend::memset_s;
+#else
+    return erase_backend::volatile_stores;
+#endif
+}
+
+/// The same answer as a printable name, so a program can log what it got.
+[[nodiscard]] constexpr const char* erase_backend_name() noexcept {
+#if defined(CTSAFE_ERASE_SECUREZEROMEMORY)
+    return "SecureZeroMemory";
+#elif defined(CTSAFE_ERASE_EXPLICIT_BZERO)
+    return "explicit_bzero";
+#elif defined(CTSAFE_ERASE_MEMSET_S)
+    return "memset_s";
+#elif defined(CTSAFE_BARRIER_ASM) || defined(CTSAFE_BARRIER_MSVC)
+    return "volatile stores + compiler barrier";
+#else
+    return "volatile stores (no barrier available)";
+#endif
+}
+
 /// Overwrite a buffer with zeroes in a way the compiler may not remove.
 ///
-/// The volatile pointer forces every store to be emitted; the barrier
-/// afterwards stops the whole loop being treated as dead because nobody reads
-/// the buffer again.
+/// Where the platform ships a routine whose whole purpose is to survive
+/// dead-store elimination, that routine is called. Where it does not, the
+/// stores go through a `volatile` pointer, which a conforming implementation
+/// must emit. Either way a barrier follows, so the buffer cannot be treated as
+/// dead across the call.
 inline void erase(void* data, std::size_t length) noexcept {
+    if (length == 0) return;
+#if defined(CTSAFE_ERASE_SECUREZEROMEMORY)
+    SecureZeroMemory(data, length);
+#elif defined(CTSAFE_ERASE_EXPLICIT_BZERO)
+    ::explicit_bzero(data, length);
+#elif defined(CTSAFE_ERASE_MEMSET_S)
+    (void)::memset_s(data, length, 0, length);
+#else
     auto* bytes = static_cast<volatile std::uint8_t*>(data);
     for (std::size_t i = 0; i < length; ++i) bytes[i] = 0;
+#endif
     detail::keep(data);
 }
 
