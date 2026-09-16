@@ -21,6 +21,85 @@ void eq_and_select_are_masks() {
     CHECK(ctsafe::select(0x00, 0xAA, 0xBB) == 0xBB);
 }
 
+void a_mask_comes_from_a_bool_by_arithmetic() {
+    CHECK(ctsafe::mask_from_bool(true) == 0xFF);
+    CHECK(ctsafe::mask_from_bool(false) == 0x00);
+    CHECK(ctsafe::select(ctsafe::mask_from_bool(true), 0xAA, 0xBB) == 0xAA);
+    CHECK(ctsafe::select(ctsafe::mask_from_bool(false), 0xAA, 0xBB) == 0xBB);
+}
+
+void select_over_buffers_takes_one_side_whole() {
+    const std::array<std::uint8_t, 4> on_true{0x11, 0x22, 0x33, 0x44};
+    const std::array<std::uint8_t, 4> on_false{0xAA, 0xBB, 0xCC, 0xDD};
+    std::array<std::uint8_t, 4> out{};
+
+    ctsafe::select(0xFF, out.data(), on_true.data(), on_false.data(), out.size());
+    CHECK(ctsafe::equals(out, on_true));
+
+    ctsafe::select(0x00, out.data(), on_true.data(), on_false.data(), out.size());
+    CHECK(ctsafe::equals(out, on_false));
+}
+
+// The destination is allowed to be one of the inputs, which is how a caller
+// keeps what it already has when the mask says no.
+void select_may_write_into_one_of_its_inputs() {
+    std::array<std::uint8_t, 4> live{0x11, 0x22, 0x33, 0x44};
+    const std::array<std::uint8_t, 4> other{0xAA, 0xBB, 0xCC, 0xDD};
+    const std::array<std::uint8_t, 4> untouched = live;
+
+    ctsafe::select(0x00, live.data(), other.data(), live.data(), live.size());
+    CHECK(ctsafe::equals(live, untouched));
+
+    ctsafe::select(0xFF, live.data(), other.data(), live.data(), live.size());
+    CHECK(ctsafe::equals(live, other));
+}
+
+void copy_if_copies_only_when_the_mask_is_set() {
+    const std::array<std::uint8_t, 8> source{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    std::array<std::uint8_t, 8> destination{};
+    destination.fill(0x5A);
+    const std::array<std::uint8_t, 8> before = destination;
+
+    ctsafe::copy_if(0x00, destination.data(), source.data(), destination.size());
+    CHECK(ctsafe::equals(destination, before));
+
+    ctsafe::copy_if(0xFF, destination.data(), source.data(), destination.size());
+    CHECK(ctsafe::equals(destination, source));
+}
+
+// The shape callers are here for: a choice that depends on a secret, made
+// without a branch that depends on the secret.
+void copy_if_takes_its_mask_from_a_comparison() {
+    std::array<std::uint8_t, 16> expected{};
+    expected.fill(0xA5);
+    auto presented = expected;
+
+    std::array<std::uint8_t, 32> session{};
+    std::array<std::uint8_t, 32> derived{};
+    derived.fill(0x27);
+
+    ctsafe::copy_if(ctsafe::mask_from_bool(ctsafe::equals(expected, presented)), session.data(),
+                    derived.data(), session.size());
+    CHECK(ctsafe::equals(session, derived));
+
+    presented[3] ^= 0x01;
+    std::array<std::uint8_t, 32> rejected{};
+    rejected.fill(0x99);
+    ctsafe::copy_if(ctsafe::mask_from_bool(ctsafe::equals(expected, presented)), session.data(),
+                    rejected.data(), session.size());
+    CHECK(ctsafe::equals(session, derived));
+}
+
+void a_conditional_copy_of_nothing_is_allowed() {
+    std::array<std::uint8_t, 1> destination{0x11};
+    const std::array<std::uint8_t, 1> source{0x22};
+
+    ctsafe::copy_if(0xFF, destination.data(), source.data(), 0);
+    CHECK(destination[0] == 0x11);  // zero length means zero bytes touched
+
+    ctsafe::select(0xFF, nullptr, nullptr, nullptr, 0);
+}
+
 void equals_agrees_with_memcmp_on_every_answer() {
     const std::string a = "the quick brown fox";
     const std::string b = "the quick brown fox";
@@ -164,6 +243,12 @@ void erase_of_nothing_is_allowed() {
 
 int main() {
     eq_and_select_are_masks();
+    a_mask_comes_from_a_bool_by_arithmetic();
+    select_over_buffers_takes_one_side_whole();
+    select_may_write_into_one_of_its_inputs();
+    copy_if_copies_only_when_the_mask_is_set();
+    copy_if_takes_its_mask_from_a_comparison();
+    a_conditional_copy_of_nothing_is_allowed();
     equals_agrees_with_memcmp_on_every_answer();
     equals_reads_the_whole_buffer_whatever_differs();
     equals_over_spans_takes_the_length_from_the_buffer();

@@ -47,6 +47,12 @@ if (ctsafe::equals(expected_tag, presented_tag)) { /* accept */ }
 // Or a pointer and a length, when that is what the caller has.
 if (ctsafe::equals(mac, expected, 16)) { /* accept */ }
 
+// Acting on the answer without branching on it: the mask decides which bytes
+// land, and the same stores happen either way.
+ctsafe::mask accepted = ctsafe::mask_from_bool(ctsafe::equals(expected_tag, presented_tag));
+ctsafe::copy_if(accepted, session_key, derived_key, 32);
+ctsafe::select(accepted, out, derived_key, fallback_key, 32);
+
 ctsafe::erase_object(session);     // size taken from the type, not retyped
 ctsafe::erase_backend_name();      // which routine that erase actually called
 ```
@@ -58,6 +64,13 @@ Header-only, C++17, no allocation, no exceptions.
 **The comparison reads every byte before deciding anything.** No branch depends
 on the contents, and the accumulated difference passes through a compiler
 barrier so the loop cannot be short-circuited.
+
+**The choice does not branch on the mask.** `select` and `copy_if` read both
+sides and write every byte of the destination whichever way the mask goes, so a
+rejected copy costs the same stores as an accepted one. The mask itself passes
+through a value barrier first, so the compiler cannot discover what it holds and
+rewrite the loop as a branch around a `memcpy` — which would put back exactly
+the leak the mask removed.
 
 **The erasure is emitted.** `erase` calls the routine the platform already
 provides for exactly this, and only argues with the optimizer itself when there
@@ -90,6 +103,12 @@ header's reach. What this gives you is source that does not *ask* the compiler
 to leak, and a barrier that stops the two specific optimisations that break
 these routines.
 
+**A mask is 0xFF or 0x00, and nothing else.** `select` and `copy_if` are
+arithmetic, not a test: handed 0x01 they mix the two sides bit by bit instead of
+rejecting it. Masks come from `eq` or `mask_from_bool`; a value invented
+elsewhere is a bug no amount of checking inside the loop could catch without
+branching on it.
+
 **The length is not secret.** The span overload accepts anything with `data()`
 and `size()` — `std::array`, `std::vector`, `std::string`, a C array,
 `std::span` on C++20 — and answers `false` on a size mismatch before a byte is
@@ -105,10 +124,11 @@ caller's problem.
 
 **The last row of the table is weaker than the others.** With no platform
 routine and no barrier — a compiler that is neither GCC, Clang nor MSVC — only
-the `volatile` stores remain. A conforming implementation must emit them, but
-nothing else is holding the optimizer back. That fallback is deliberate, named
-by `erase_backend_name()`, and marked in the source rather than silently
-pretended away.
+the `volatile` stores remain, and the mask handed to `select` stays transparent
+to the optimizer. A conforming implementation must emit the stores, but nothing
+else is holding it back. That fallback is deliberate, named by
+`erase_backend_name()`, and marked in the source rather than silently pretended
+away.
 
 ## Status
 
@@ -116,7 +136,7 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`), constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine |
+| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine |
 | Not yet | constant-time integer comparison and conditional swap for bignum code, a `secure_buffer` type that erases in its destructor |
 
 ## Development

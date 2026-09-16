@@ -88,6 +88,20 @@ inline void keep(const volatile void* p) noexcept {
 #endif
 }
 
+/// The same mask back, as a value the compiler can no longer reason about.
+///
+/// Without this a compiler that can see where the mask came from is free to
+/// rewrite `out[i] = (a[i] & m) | (b[i] & ~m)` as a branch around a copy, which
+/// is the leak the mask existed to remove. Where no barrier is available the
+/// arithmetic is all that remains; erase_backend_name() reports which build
+/// this is.
+inline mask hide(mask m) noexcept {
+#if defined(CTSAFE_BARRIER_ASM)
+    asm volatile("" : "+r"(m));
+#endif
+    return m;
+}
+
 /// Recognises the shapes a caller already holds — std::array, std::vector,
 /// std::string, std::string_view, and std::span on C++20 — by the two members
 /// they all provide. Byte-sized elements only, so a wider element type cannot
@@ -113,6 +127,35 @@ struct is_byte_range<T, std::void_t<decltype(std::declval<const T&>().size()),
 /// Select a when m is 0xFF and b when m is 0x00, without branching.
 [[nodiscard]] inline std::uint8_t select(mask m, std::uint8_t a, std::uint8_t b) noexcept {
     return static_cast<std::uint8_t>((a & m) | (b & static_cast<std::uint8_t>(~m)));
+}
+
+/// The bridge from a bool the caller already has to a mask: 0xFF for true,
+/// 0x00 for false, by arithmetic rather than by a test.
+[[nodiscard]] inline mask mask_from_bool(bool condition) noexcept {
+    return static_cast<mask>(0u - static_cast<unsigned>(condition));
+}
+
+/// Write on_true into destination when m is 0xFF, and on_false when m is 0x00.
+///
+/// All three buffers must hold at least `length` bytes, and every one of those
+/// bytes is read and written whichever way the mask goes. The destination may
+/// be exactly one of the inputs; it may not partially overlap either.
+inline void select(mask m, void* destination, const void* on_true, const void* on_false,
+                   std::size_t length) noexcept {
+    auto* out = static_cast<std::uint8_t*>(destination);
+    const auto* a = static_cast<const std::uint8_t*>(on_true);
+    const auto* b = static_cast<const std::uint8_t*>(on_false);
+
+    const mask opaque = detail::hide(m);
+    for (std::size_t i = 0; i < length; ++i) out[i] = select(opaque, a[i], b[i]);
+    detail::keep(destination);
+}
+
+/// Copy source over destination when m is 0xFF, and leave destination as it was
+/// when m is 0x00 — in both cases by reading and rewriting every byte, so the
+/// stores happen either way and only their values differ.
+inline void copy_if(mask m, void* destination, const void* source, std::size_t length) noexcept {
+    select(m, destination, source, destination, length);
 }
 
 /// A non-owning span of bytes: a pointer and a length that travel together.
