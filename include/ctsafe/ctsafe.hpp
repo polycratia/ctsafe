@@ -114,6 +114,18 @@ struct is_byte_range<T, std::void_t<decltype(std::declval<const T&>().size()),
                                    std::enable_if_t<sizeof(*std::declval<const T&>().data()) == 1>>>
     : std::true_type {};
 
+/// The same shapes, but writable: a secret has to be erasable in place, so a
+/// range whose data() hands back a const pointer is not one of them.
+template <typename, typename = void>
+struct is_mutable_byte_range : std::false_type {};
+
+template <typename T>
+struct is_mutable_byte_range<
+    T, std::void_t<decltype(std::declval<T&>().size()),
+                   std::enable_if_t<sizeof(*std::declval<T&>().data()) == 1>,
+                   std::enable_if_t<!std::is_const<std::remove_reference_t<
+                       decltype(*std::declval<T&>().data())>>::value>>> : std::true_type {};
+
 }  // namespace detail
 
 /// 0xFF when a == b, 0x00 otherwise. No branch on the values.
@@ -289,6 +301,90 @@ inline void erase_object(T& object) noexcept {
     static_assert(!__is_polymorphic(T), "erasing a polymorphic object would destroy its vtable pointer");
     erase(&object, sizeof(T));
 }
+
+/// A non-owning span over bytes that are a secret, erased when it leaves scope.
+///
+/// Three things happen to secrets by accident: they get compared with an
+/// operator that returns early, they get printed, and they get left in memory
+/// at the end of a function. The first two are deleted here, so they are build
+/// errors rather than findings; the third is answered in the destructor.
+///
+/// It is a guard, not a container. The buffer belongs to whoever declared it,
+/// and the erase happens when the guard dies, not when the buffer does. The
+/// constructors are explicit for that reason: a buffer handed to a function
+/// must not be wrapped into a temporary that erases it at the end of the
+/// statement that passed it.
+///
+/// Comparison is still available, spelled as what it is: the span converts to
+/// byte_view, so `equals(secret, presented)` reads every byte.
+class secret_span {
+public:
+    secret_span() noexcept = default;
+
+    secret_span(void* data, std::size_t size) noexcept
+        : data_(static_cast<std::uint8_t*>(data)), size_(size) {}
+
+    template <typename T, std::size_t N,
+              typename = std::enable_if_t<sizeof(T) == 1 && !std::is_const<T>::value>>
+    explicit secret_span(T (&array)[N]) noexcept
+        : data_(reinterpret_cast<std::uint8_t*>(array)), size_(N) {}
+
+    template <typename Range,
+              typename = std::enable_if_t<detail::is_mutable_byte_range<Range>::value>>
+    explicit secret_span(Range& range) noexcept
+        : data_(reinterpret_cast<std::uint8_t*>(range.data())), size_(range.size()) {}
+
+    secret_span(const secret_span&) = delete;
+    secret_span& operator=(const secret_span&) = delete;
+
+    secret_span(secret_span&& other) noexcept : data_(other.data_), size_(other.size_) {
+        other.release();
+    }
+
+    secret_span& operator=(secret_span&& other) noexcept {
+        if (this != &other) {
+            erase_now();
+            data_ = other.data_;
+            size_ = other.size_;
+            other.release();
+        }
+        return *this;
+    }
+
+    ~secret_span() { erase_now(); }
+
+    [[nodiscard]] std::uint8_t* data() noexcept { return data_; }
+    [[nodiscard]] const std::uint8_t* data() const noexcept { return data_; }
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+
+    /// Erase the bytes now rather than at scope exit. The span keeps naming
+    /// them, so the destructor will zero an already-zero buffer, which costs
+    /// the same and promises no less.
+    void erase_now() noexcept { erase(data_, size_); }
+
+    /// Give the erase back to the caller: the bytes are left exactly as they
+    /// are and this span stops naming them.
+    void release() noexcept {
+        data_ = nullptr;
+        size_ = 0;
+    }
+
+    /// Deleted, not missing. `==` on secrets is memcmp underneath, which
+    /// returns on the first differing byte; ctsafe::equals is the comparison
+    /// that reads all of them.
+    friend bool operator==(const secret_span&, const secret_span&) = delete;
+    friend bool operator!=(const secret_span&, const secret_span&) = delete;
+
+    /// Deleted for every stream type, so a secret cannot reach a log, a trace
+    /// line or a debug print by being written out.
+    template <typename Stream>
+    friend Stream& operator<<(Stream&, const secret_span&) = delete;
+
+private:
+    std::uint8_t* data_ = nullptr;
+    std::size_t size_ = 0;
+};
 
 }  // namespace ctsafe
 

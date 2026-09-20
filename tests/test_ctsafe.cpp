@@ -4,7 +4,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ostream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "harness.hpp"
@@ -239,6 +242,132 @@ void erase_of_nothing_is_allowed() {
     CHECK(one[0] == 0x11);  // zero length means zero bytes touched
 }
 
+void a_secret_span_erases_when_it_leaves_scope() {
+    std::array<std::uint8_t, 32> key{};
+    key.fill(0x5A);
+    {
+        ctsafe::secret_span secret(key);
+        CHECK(secret.size() == key.size());
+        CHECK(!secret.empty());
+        CHECK(!ctsafe::is_zero(secret.data(), secret.size()));
+    }
+    CHECK(ctsafe::is_zero(key.data(), key.size()));
+}
+
+void a_secret_span_takes_a_c_array_whole() {
+    std::uint8_t raw[16];
+    std::memset(raw, 0x11, sizeof raw);
+    {
+        ctsafe::secret_span secret(raw);
+        CHECK(secret.size() == sizeof raw);
+    }
+    CHECK(ctsafe::is_zero(raw, sizeof raw));
+}
+
+// The erase belongs to exactly one span at a time, so a moved-from guard is
+// empty and the buffer is cleared once, where the surviving guard dies.
+void moving_a_secret_span_moves_the_duty() {
+    std::array<std::uint8_t, 8> key{};
+    key.fill(0x33);
+    {
+        ctsafe::secret_span outer;
+        {
+            ctsafe::secret_span inner(key);
+            outer = std::move(inner);
+            CHECK(inner.size() == 0);
+            CHECK(inner.data() == nullptr);
+        }
+        CHECK(!ctsafe::is_zero(key.data(), key.size()));
+        CHECK(outer.size() == key.size());
+    }
+    CHECK(ctsafe::is_zero(key.data(), key.size()));
+}
+
+void assigning_over_a_secret_span_erases_what_it_held() {
+    std::array<std::uint8_t, 8> first{};
+    first.fill(0x66);
+    std::array<std::uint8_t, 8> second{};
+    second.fill(0x77);
+    {
+        ctsafe::secret_span secret(first);
+        secret = ctsafe::secret_span(second);
+        CHECK(ctsafe::is_zero(first.data(), first.size()));
+        CHECK(!ctsafe::is_zero(second.data(), second.size()));
+    }
+    CHECK(ctsafe::is_zero(second.data(), second.size()));
+}
+
+void a_released_secret_span_leaves_the_bytes_alone() {
+    std::array<std::uint8_t, 8> key{};
+    key.fill(0x44);
+    {
+        ctsafe::secret_span secret(key);
+        secret.release();
+    }
+    CHECK(!ctsafe::is_zero(key.data(), key.size()));
+    ctsafe::erase(key.data(), key.size());
+}
+
+void a_secret_span_can_erase_early() {
+    std::array<std::uint8_t, 8> key{};
+    key.fill(0x55);
+    ctsafe::secret_span secret(key);
+    secret.erase_now();
+    CHECK(ctsafe::is_zero(key.data(), key.size()));
+    CHECK(secret.size() == key.size());  // still naming the bytes, now zero
+}
+
+void an_empty_secret_span_is_harmless() {
+    ctsafe::secret_span nothing;
+    CHECK(nothing.empty());
+    CHECK(nothing.size() == 0);
+    CHECK(nothing.data() == nullptr);
+    nothing.erase_now();
+}
+
+// Comparison is not removed, only the spelling that returns early: the span
+// converts to a byte_view, so equals() reads every byte of it.
+void a_secret_span_is_compared_with_equals() {
+    std::array<std::uint8_t, 16> tag{};
+    tag.fill(0xA5);
+    auto presented = tag;
+
+    ctsafe::secret_span secret(tag);
+    CHECK(ctsafe::equals(secret, presented));
+    presented[0] ^= 0x01;
+    CHECK(!ctsafe::equals(secret, presented));
+}
+
+template <typename T, typename = void>
+struct has_equality : std::false_type {};
+
+template <typename T>
+struct has_equality<T, std::void_t<decltype(std::declval<const T&>() == std::declval<const T&>())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct is_streamable : std::false_type {};
+
+template <typename T>
+struct is_streamable<T, std::void_t<decltype(std::declval<std::ostream&>()
+                                             << std::declval<const T&>())>> : std::true_type {};
+
+// The deletions are the point of the type, so they are checked the only way a
+// deletion can be: by asking whether the expression would compile at all. The
+// positive cases are there so a detector that always answers false is caught.
+void a_secret_span_refuses_comparison_and_streaming() {
+    CHECK(!has_equality<ctsafe::secret_span>::value);
+    CHECK((has_equality<std::array<std::uint8_t, 4>>::value));
+
+    CHECK(!is_streamable<ctsafe::secret_span>::value);
+    CHECK(is_streamable<int>::value);
+
+    CHECK(!std::is_copy_constructible<ctsafe::secret_span>::value);
+    CHECK(!std::is_copy_assignable<ctsafe::secret_span>::value);
+    CHECK(std::is_move_constructible<ctsafe::secret_span>::value);
+    CHECK(std::is_move_assignable<ctsafe::secret_span>::value);
+}
+
 }  // namespace
 
 int main() {
@@ -261,5 +390,14 @@ int main() {
     erase_is_visible_through_a_volatile_read();
     the_erase_backend_names_itself();
     erase_of_nothing_is_allowed();
+    a_secret_span_erases_when_it_leaves_scope();
+    a_secret_span_takes_a_c_array_whole();
+    moving_a_secret_span_moves_the_duty();
+    assigning_over_a_secret_span_erases_what_it_held();
+    a_released_secret_span_leaves_the_bytes_alone();
+    a_secret_span_can_erase_early();
+    an_empty_secret_span_is_harmless();
+    a_secret_span_is_compared_with_equals();
+    a_secret_span_refuses_comparison_and_streaming();
     return harness::report("ctsafe");
 }

@@ -57,6 +57,22 @@ ctsafe::erase_object(session);     // size taken from the type, not retyped
 ctsafe::erase_backend_name();      // which routine that erase actually called
 ```
 
+Bytes that must not outlive the scope holding them get a guard. It erases on
+the way out, and the two spellings that leak a secret by accident do not
+compile:
+
+```cpp
+{
+    ctsafe::secret_span secret(key);      // key is a std::array, vector, or C array
+
+    sign(message, secret.data(), secret.size());
+    if (ctsafe::equals(secret, presented)) { /* accept */ }
+
+    // secret == presented;   // deleted: that comparison is memcmp underneath
+    // std::cerr << secret;   // deleted: a secret does not go to a log
+}   // key is zero here
+```
+
 Header-only, C++17, no allocation, no exceptions.
 
 ## What it actually guarantees
@@ -90,6 +106,12 @@ be treated as dead across the call. Which row a build took is reported by
 one. The test suite runs at `-O2` as well as under the sanitizers, because an
 erasure that only survives at `-O0` is precisely the bug.
 
+**The guard erases once, on the way out of the scope it was declared in.**
+`secret_span` holds a pointer and a length, not the buffer, and the erase
+belongs to exactly one span: moving it hands the duty over and leaves the source
+empty, so nothing is cleared twice and nothing is left behind. `erase_now()`
+clears early; `release()` hands the duty back to the caller.
+
 On Windows the header includes `<windows.h>` to reach `SecureZeroMemory`; define
 `CTSAFE_NO_WINDOWS_H` to keep it out of the translation unit and take the
 fallback instead.
@@ -122,6 +144,15 @@ already written to swap. Erase clears the bytes you name, at the moment you name
 them; keeping the secret from being duplicated in the first place is the
 caller's problem.
 
+**`secret_span` narrows the mistake rather than closing it.** Deleting `==` and
+`<<` stops the two spellings that actually appear in code; `memcmp(secret.data(),
+...)` and `printf("%s", secret.data())` are still there to be written, because a
+type that hid its bytes entirely could not be used to sign anything. It is also
+a guard, not a container: the buffer belongs to whoever declared it, the erase
+happens when the guard dies rather than when the buffer does, and the
+constructors are explicit so a buffer passed to a function cannot be wrapped
+into a temporary that erases it at the end of the statement.
+
 **The last row of the table is weaker than the others.** With no platform
 routine and no barrier — a compiler that is neither GCC, Clang nor MSVC — only
 the `volatile` stores remain, and the mask handed to `select` stays transparent
@@ -136,8 +167,8 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine |
-| Not yet | constant-time integer comparison and conditional swap for bignum code, a `secure_buffer` type that erases in its destructor |
+| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming |
+| Not yet | constant-time integer comparison and conditional swap for bignum code, an owning buffer that allocates and erases |
 
 ## Development
 
