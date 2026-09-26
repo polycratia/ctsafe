@@ -116,14 +116,59 @@ On Windows the header includes `<windows.h>` to reach `SecureZeroMemory`; define
 `CTSAFE_NO_WINDOWS_H` to keep it out of the translation unit and take the
 fallback instead.
 
+## Putting the timing claim on a clock
+
+`make timing` runs the routines past a statistical harness in the shape of
+dudect (Reparaz, Balasch and Verbauwhede, *dude, is my code constant time?*,
+2016). Each case times one operation over two classes of input — equal against
+one differing byte, a difference in the first byte against the last, all zero
+against a single set bit, a mask set against a mask clear — drawing the class at
+random before every measurement so that drift cannot line up with one class. The
+slow tail where the scheduler lives is cropped at a hundred percentiles, Welch's
+t-test is applied to each crop, and the largest `|t|` decides. Above 10 is a
+difference; the process exits non-zero, so an unattended run fails rather than
+printing a number nobody reads.
+
+```console
+$ make timing
+ctsafe timing: 6 rounds x 20000 measurements x 4 executions, 1024-byte buffers
+
+equals: equal vs one differing byte
+  max |t| = 1.84 across 101 crops, 120000 measurements, 6 rounds
+  no difference at |t| > 10 - consistent with constant time
+
+...
+
+control - memcmp: equal vs a difference in the first byte
+  max |t| = 148.02 across 101 crops, 20000 measurements, 1 rounds
+  difference found, which is what this case is for
+
+ctsafe timing: 5 cases, 0 unexpected
+```
+
+The last case is the reason the others are worth reading. A harness that finds
+nothing is either measuring a constant-time routine or measuring nothing at all,
+and from outside the two look identical, so the suite also measures `memcmp` —
+a leak of known size that has to come out significant. When it does not, the run
+says it was blind instead of saying it passed.
+
+The binary is built at `-O2` and without the sanitizers, because both `-O0` and
+the instrumentation would time something other than what ships. A case that
+lands on the wrong side is measured once more with a different seed, since a
+loaded machine produces a large `t` without any help from the code, and only the
+repeat counts. A `|t|` between 5 and 10 is reported as worth a longer run:
+`make timing ROUNDS=40`.
+
 ## What it does not guarantee, stated plainly
 
 **It is not proof of constant time.** A unit test cannot demonstrate that; only
 reading the generated instructions can, and even then the CPU has the last word
 — caches, branch prediction and speculative execution are outside a portable
-header's reach. What this gives you is source that does not *ask* the compiler
-to leak, and a barrier that stops the two specific optimisations that break
-these routines.
+header's reach. The timing harness tries to *disprove* it on the machine in
+front of you and reports how hard it tried, which is a different and weaker
+thing than a proof. What this gives you is source that does not *ask* the
+compiler to leak, a barrier that stops the two specific optimisations that break
+these routines, and a clock pointed at the result.
 
 **A mask is 0xFF or 0x00, and nothing else.** `select` and `copy_if` are
 arithmetic, not a test: handed 0x01 they mix the two sides bit by bit instead of
@@ -167,7 +212,7 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming |
+| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming, a dudect-style timing harness with a known-leak control |
 | Not yet | constant-time integer comparison and conditional swap for bignum code, an owning buffer that allocates and erases |
 
 ## Development
@@ -175,7 +220,9 @@ Small on purpose, and unlikely to grow much.
 ```bash
 make test        # sanitizers, -O0
 make optimized   # the same suite at -O2, where a naive erase would vanish
+make timing      # the timing harness, at -O2 and without the sanitizers
 make demo
+make check       # test, optimized and timing
 ```
 
 ## License
