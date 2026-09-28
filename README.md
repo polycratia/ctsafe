@@ -103,8 +103,8 @@ Every path ends in a compiler barrier — an empty `asm` block with a memory
 clobber on GCC and Clang, `_ReadWriteBarrier()` on MSVC — so the buffer cannot
 be treated as dead across the call. Which row a build took is reported by
 `ctsafe::erase_backend_name()`, because a guarantee you have to guess at is not
-one. The test suite runs at `-O2` as well as under the sanitizers, because an
-erasure that only survives at `-O0` is precisely the bug.
+one. The suite runs at `-O0`, `-O2` and `-O3` as well as under the sanitizers,
+because an erasure that only survives at `-O0` is precisely the bug.
 
 **The guard erases once, on the way out of the scope it was declared in.**
 `secret_span` holds a pointer and a length, not the buffer, and the erase
@@ -115,6 +115,47 @@ clears early; `release()` hands the duty back to the caller.
 On Windows the header includes `<windows.h>` to reach `SecureZeroMemory`; define
 `CTSAFE_NO_WINDOWS_H` to keep it out of the translation unit and take the
 fallback instead.
+
+## Checking that the store survived
+
+A test can only see the zeroes, and it reads them back — which is exactly the
+case the optimizer is not allowed to delete. Nothing in a test says what happens
+in the function that clears a buffer and then returns. `make disasm` reads the
+instructions instead: three functions that differ only in how they clear a
+buffer nothing touches afterwards, compiled at each level and counted.
+
+```console
+$ make disasm
+ctsafe erase disassembly: c++ at -O0 -O2 -O3, read with objdump
+
+-O0
+  no erase, the floor     23 instructions
+  ctsafe::erase           27 instructions  calls ctsafe::erase(void*, unsigned long)
+  memset, the control     27 instructions
+  emitted; at -O0 nothing is deleted, so this level decides nothing
+
+-O2
+  no erase, the floor     11 instructions
+  ctsafe::erase           14 instructions  calls explicit_bzero
+  memset, the control     11 instructions
+  emitted, and the control was deleted: the check can tell the two apart
+
+-O3
+  no erase, the floor     11 instructions
+  ctsafe::erase           14 instructions  calls explicit_bzero
+  memset, the control     11 instructions
+  emitted, and the control was deleted: the check can tell the two apart
+
+ctsafe erase disassembly: 3 levels, 0 unexpected
+```
+
+The control is the reason the other two rows mean anything, the same way the
+timing harness measures `memcmp`. A `memset` over a dead buffer is a store that
+*should* disappear, so a run where it did not is a run that would have reported
+the naive spelling as safe; it says it was blind and exits non-zero rather than
+passing. What the check covers is `erase`, on the build in front of you, at the
+levels in `OPT_LEVELS` — not the comparison, whose instruction stream still has
+to be read by hand.
 
 ## Putting the timing claim on a clock
 
@@ -212,17 +253,18 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming, a dudect-style timing harness with a known-leak control |
+| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming, a dudect-style timing harness with a known-leak control, a disassembly check that the erase is still in the instruction stream at `-O2` and `-O3` |
 | Not yet | constant-time integer comparison and conditional swap for bignum code, an owning buffer that allocates and erases |
 
 ## Development
 
 ```bash
 make test        # sanitizers, -O0
-make optimized   # the same suite at -O2, where a naive erase would vanish
+make matrix      # the same suite at -O0, -O2 and -O3, where a naive erase vanishes
+make disasm      # read the emitted erase and check the store is still there
 make timing      # the timing harness, at -O2 and without the sanitizers
 make demo
-make check       # test, optimized and timing
+make check       # test, matrix, disasm and timing
 ```
 
 ## License
