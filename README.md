@@ -116,6 +116,49 @@ On Windows the header includes `<windows.h>` to reach `SecureZeroMemory`; define
 `CTSAFE_NO_WINDOWS_H` to keep it out of the translation unit and take the
 fallback instead.
 
+## Constant time at the source, and the part the CPU keeps
+
+"Constant time" is not one property. It is a claim that has to survive three
+layers, and only the first two are within reach of a portable header.
+
+**The source — decided here, and readable.** No branch and no memory address
+depends on a secret value. `equals` accumulates every byte and decides
+afterwards; `select` and `copy_if` are arithmetic over both sides; nothing here
+indexes a table with a secret, which is the shape that turns a cache into an
+oracle. This layer is settled by the code in front of you, and reading it is how
+you check it.
+
+**The compiler — held at two named points.** Two rewrites undo the source:
+deleting a store to a buffer nothing reads again, and recognising a mask well
+enough to replace the arithmetic with a branch around a `memcpy`. Both are
+blocked where they would happen — `detail::keep` after an erase or a comparison,
+`detail::hide` before a masked loop — and both are checked rather than asserted:
+`make disasm` reads the emitted erase, `make timing` puts a clock on the masked
+copy. Everything else a compiler may do is still permitted. Vectorising the
+loop, unrolling it, spilling the accumulator, reordering the two loads: none of
+those makes the work depend on the values, but nothing here verifies that for
+your compiler either. The instruction stream is the only authority, and the
+check in this repository reads it for `erase` alone.
+
+**The CPU — out of reach, and no version of this header changes that.**
+
+| What the hardware decides | What the source can say about it |
+|---|---|
+| Cache and TLB residency | The addresses touched are the whole buffer, in order, never an index derived from a secret. Whether those lines were already resident is settled before the call. |
+| Branch prediction | There is no secret-dependent branch left to mispredict; the loop's own exit is predicted the same way whichever class the input belonged to. |
+| Speculative and transient execution | Spectre-class leaks read past the architectural argument entirely. Mitigation belongs to microcode, the kernel and the build flags, not to a comparison loop. |
+| Instruction latency by operand | The routines use xor, and, or, a subtract and a shift by a constant, over bytes — fixed latency on mainstream cores. On a core where they are not, the claim fails and this header cannot tell you so. |
+| Frequency scaling (Hertzbleed), SMT neighbours, interrupts | Data-dependent frequency and shared-core contention are timing channels the process can neither observe nor suppress. The harness crops that noise; the code cannot remove it. |
+| Power, EM and acoustic channels | Not timing at all, and entirely outside the scope of anything written here. |
+
+So the claim in its honest form: *this source does not ask for a data-dependent
+path, and the two compiler rewrites that would create one are blocked and
+checked.* Turning that into "this binary runs in constant time on this core"
+takes reading the disassembly your compiler produced and knowing the latencies
+of the CPU that will run it. Where that is not enough — a cipher core, a
+bignum ladder, a target with a published attack — the answer is a verified
+implementation for that machine, not a portable header.
+
 ## Checking that the store survived
 
 A test can only see the zeroes, and it reads them back — which is exactly the
@@ -200,16 +243,19 @@ loaded machine produces a large `t` without any help from the code, and only the
 repeat counts. A `|t|` between 5 and 10 is reported as worth a longer run:
 `make timing ROUNDS=40`.
 
+What a clean run establishes is bounded by the machine that produced it: this
+build, this core, this load, this seed. It is evidence that no difference large
+enough to find was there to find, not evidence that none exists.
+
 ## What it does not guarantee, stated plainly
 
-**It is not proof of constant time.** A unit test cannot demonstrate that; only
-reading the generated instructions can, and even then the CPU has the last word
-— caches, branch prediction and speculative execution are outside a portable
-header's reach. The timing harness tries to *disprove* it on the machine in
-front of you and reports how hard it tried, which is a different and weaker
-thing than a proof. What this gives you is source that does not *ask* the
-compiler to leak, a barrier that stops the two specific optimisations that break
-these routines, and a clock pointed at the result.
+**It is not proof of constant time.** A unit test cannot demonstrate that, and
+neither can a header; the three layers above say which part is held where. The
+timing harness tries to *disprove* the claim on the machine in front of you and
+reports how hard it tried, which is a different and weaker thing than a proof.
+What this gives you is source that does not *ask* the compiler to leak, a
+barrier that stops the two specific optimisations that break these routines, and
+a clock pointed at the result.
 
 **A mask is 0xFF or 0x00, and nothing else.** `select` and `copy_if` are
 arithmetic, not a test: handed 0x01 they mix the two sides bit by bit instead of
