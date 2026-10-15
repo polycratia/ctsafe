@@ -29,7 +29,15 @@
 // Which barrier is available. GCC and Clang accept an empty asm block with a
 // memory clobber; MSVC has an intrinsic that constrains the optimizer the same
 // way. A compiler with neither is handled, and says so.
-#if defined(__GNUC__) || defined(__clang__)
+//
+// CTSAFE_PORTABLE declines both, and the platform erase routine below with
+// them: it forces the bottom row of every table, so the weakest build this
+// header can produce is one a machine with the strong rows can still compile
+// and run.
+#if defined(CTSAFE_PORTABLE)
+// No barrier, by choice rather than by platform: detail::hide falls back to a
+// volatile round-trip and detail::keep to nothing.
+#elif defined(__GNUC__) || defined(__clang__)
 #define CTSAFE_BARRIER_ASM 1
 #elif defined(_MSC_VER)
 #define CTSAFE_BARRIER_MSVC 1
@@ -42,8 +50,10 @@
 // the fallback, and it is named in erase_backend_name() rather than assumed.
 //
 // Defining CTSAFE_NO_WINDOWS_H keeps <windows.h> out of the translation unit at
-// the cost of taking the fallback there.
-#if defined(_WIN32) && !defined(CTSAFE_NO_WINDOWS_H)
+// the cost of taking the fallback there; CTSAFE_PORTABLE takes it everywhere.
+#if defined(CTSAFE_PORTABLE)
+#define CTSAFE_ERASE_VOLATILE 1
+#elif defined(_WIN32) && !defined(CTSAFE_NO_WINDOWS_H)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -92,14 +102,19 @@ inline void keep(const volatile void* p) noexcept {
 ///
 /// Without this a compiler that can see where the mask came from is free to
 /// rewrite `out[i] = (a[i] & m) | (b[i] & ~m)` as a branch around a copy, which
-/// is the leak the mask existed to remove. Where no barrier is available the
-/// arithmetic is all that remains; erase_backend_name() reports which build
-/// this is.
+/// is the leak the mask existed to remove. Where there is no asm block to
+/// launder the value through, it travels through a `volatile` object instead:
+/// the store and the load both have to happen, and what comes back is a value
+/// no implementation is allowed to assume it knows. So the mask is opaque on
+/// every row of the table, including the one with no barrier at all.
 inline mask hide(mask m) noexcept {
 #if defined(CTSAFE_BARRIER_ASM)
     asm volatile("" : "+r"(m));
-#endif
     return m;
+#else
+    volatile mask opaque = m;
+    return opaque;
+#endif
 }
 
 /// Recognises the shapes a caller already holds — std::array, std::vector,
@@ -268,6 +283,8 @@ enum class erase_backend {
     return "memset_s";
 #elif defined(CTSAFE_BARRIER_ASM) || defined(CTSAFE_BARRIER_MSVC)
     return "volatile stores + compiler barrier";
+#elif defined(CTSAFE_PORTABLE)
+    return "volatile stores, no barrier (CTSAFE_PORTABLE)";
 #else
     return "volatile stores (no barrier available)";
 #endif

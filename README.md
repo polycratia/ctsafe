@@ -86,7 +86,10 @@ sides and write every byte of the destination whichever way the mask goes, so a
 rejected copy costs the same stores as an accepted one. The mask itself passes
 through a value barrier first, so the compiler cannot discover what it holds and
 rewrite the loop as a branch around a `memcpy` — which would put back exactly
-the leak the mask removed.
+the leak the mask removed. That barrier is an `asm` block on GCC and Clang and a
+`volatile` round-trip everywhere else, which a conforming implementation has to
+perform as written; there is no build in which the mask reaches the loop as a
+value the optimizer can read.
 
 **The erasure is emitted.** `erase` calls the routine the platform already
 provides for exactly this, and only argues with the optimizer itself when there
@@ -104,7 +107,9 @@ clobber on GCC and Clang, `_ReadWriteBarrier()` on MSVC — so the buffer cannot
 be treated as dead across the call. Which row a build took is reported by
 `ctsafe::erase_backend_name()`, because a guarantee you have to guess at is not
 one. The suite runs at `-O0`, `-O2` and `-O3` as well as under the sanitizers,
-because an erasure that only survives at `-O0` is precisely the bug.
+because an erasure that only survives at `-O0` is precisely the bug — and `make
+test` runs it twice, once for the rows this platform selected and once with
+`CTSAFE_PORTABLE`, which forces the bottom row of every table.
 
 **The guard erases once, on the way out of the scope it was declared in.**
 `secret_span` holds a pointer and a length, not the buffer, and the erase
@@ -114,7 +119,10 @@ clears early; `release()` hands the duty back to the caller.
 
 On Windows the header includes `<windows.h>` to reach `SecureZeroMemory`; define
 `CTSAFE_NO_WINDOWS_H` to keep it out of the translation unit and take the
-fallback instead.
+fallback instead. Defining `CTSAFE_PORTABLE` takes every fallback at once — no
+platform routine, no compiler barrier, the mask hidden by the `volatile`
+round-trip — which is the shape a compiler this header does not recognise would
+get, and the build `make test` runs second.
 
 ## Constant time at the source, and the part the CPU keeps
 
@@ -286,12 +294,14 @@ constructors are explicit so a buffer passed to a function cannot be wrapped
 into a temporary that erases it at the end of the statement.
 
 **The last row of the table is weaker than the others.** With no platform
-routine and no barrier — a compiler that is neither GCC, Clang nor MSVC — only
-the `volatile` stores remain, and the mask handed to `select` stays transparent
-to the optimizer. A conforming implementation must emit the stores, but nothing
-else is holding it back. That fallback is deliberate, named by
-`erase_backend_name()`, and marked in the source rather than silently pretended
-away.
+routine and no barrier — a compiler that is neither GCC, Clang nor MSVC, or any
+build with `CTSAFE_PORTABLE` — the `volatile` stores stand on their own: a
+conforming implementation must emit them, but `detail::keep` is a no-op there,
+so nothing else argues with the optimizer about the buffer being dead. The mask
+is not in that position; it goes through a `volatile` round-trip the
+implementation must also perform. That fallback is deliberate, named by
+`erase_backend_name()`, exercised by `make test` rather than described, and
+marked in the source rather than silently pretended away.
 
 ## Status
 
@@ -299,13 +309,13 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming, a dudect-style timing harness with a known-leak control, a disassembly check that the erase is still in the instruction stream at `-O2` and `-O3` |
+| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming, a `CTSAFE_PORTABLE` build that forces every fallback row, a dudect-style timing harness with a known-leak control, a disassembly check that the erase is still in the instruction stream at `-O2` and `-O3` |
 | Not yet | constant-time integer comparison and conditional swap for bignum code, an owning buffer that allocates and erases |
 
 ## Development
 
 ```bash
-make test        # sanitizers, -O0
+make test        # sanitizers, -O0, twice: this platform's rows and the forced fallbacks
 make matrix      # the same suite at -O0, -O2 and -O3, where a naive erase vanishes
 make disasm      # read the emitted erase and check the store is still there
 make timing      # the timing harness, at -O2 and without the sanitizers

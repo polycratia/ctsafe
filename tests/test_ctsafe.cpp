@@ -31,6 +31,17 @@ void a_mask_comes_from_a_bool_by_arithmetic() {
     CHECK(ctsafe::select(ctsafe::mask_from_bool(false), 0xAA, 0xBB) == 0xBB);
 }
 
+// Whether the mask came back opaque is not observable from here; whether it came
+// back unchanged is, and it has to on every row — the asm block, the volatile
+// round-trip that stands in for it, and nothing else. A row that altered the
+// value would turn select into a bit mixer.
+void hiding_a_mask_returns_it_unchanged() {
+    CHECK(ctsafe::detail::hide(0xFF) == 0xFF);
+    CHECK(ctsafe::detail::hide(0x00) == 0x00);
+    CHECK(ctsafe::select(ctsafe::detail::hide(ctsafe::mask_from_bool(true)), 0xAA, 0xBB) == 0xAA);
+    CHECK(ctsafe::select(ctsafe::detail::hide(ctsafe::mask_from_bool(false)), 0xAA, 0xBB) == 0xBB);
+}
+
 void select_over_buffers_takes_one_side_whole() {
     const std::array<std::uint8_t, 4> on_true{0x11, 0x22, 0x33, 0x44};
     const std::array<std::uint8_t, 4> on_false{0xAA, 0xBB, 0xCC, 0xDD};
@@ -233,6 +244,11 @@ void the_erase_backend_names_itself() {
     CHECK(name[0] != '\0');
     CHECK((ctsafe::erase_backend_used() == ctsafe::erase_backend::volatile_stores) ==
           (std::strncmp(name, "volatile", 8) == 0));
+#if defined(CTSAFE_PORTABLE)
+    // The forced-fallback build: every row is the bottom one, whatever the
+    // platform would have offered.
+    CHECK(ctsafe::erase_backend_used() == ctsafe::erase_backend::volatile_stores);
+#endif
     std::printf("erase backend: %s\n", name);
 }
 
@@ -373,6 +389,7 @@ void a_secret_span_refuses_comparison_and_streaming() {
 int main() {
     eq_and_select_are_masks();
     a_mask_comes_from_a_bool_by_arithmetic();
+    hiding_a_mask_returns_it_unchanged();
     select_over_buffers_takes_one_side_whole();
     select_may_write_into_one_of_its_inputs();
     copy_if_copies_only_when_the_mask_is_set();

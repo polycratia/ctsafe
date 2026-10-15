@@ -6,10 +6,16 @@ ROUNDS ?=
 
 .PHONY: test matrix disasm timing demo check clean
 
+# Twice: the rows this platform selects, and the rows a compiler this header
+# does not recognise would get. CTSAFE_PORTABLE forces every fallback — no
+# platform erase routine, no compiler barrier — so the weakest build the library
+# ships is run rather than described.
 test:
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(SAN) tests/test_ctsafe.cpp -o build/tests
 	./build/tests
+	$(CXX) $(CXXFLAGS) $(SAN) -DCTSAFE_PORTABLE tests/test_ctsafe.cpp -o build/tests-portable
+	./build/tests-portable
 
 # The same suite at every optimisation level. An erasure that only survives at
 # -O0 is the bug this library exists to prevent, so -O2 and -O3 are part of the
