@@ -3,6 +3,7 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -Iinclude -Itests
 SAN ?= -fsanitize=address,undefined -fno-omit-frame-pointer -g
 OPT_LEVELS ?= -O0 -O2 -O3
 ROUNDS ?=
+SUITES ?= tests/test_ctsafe.cpp tests/test_less_than.cpp
 
 .PHONY: test matrix disasm timing demo check clean
 
@@ -12,12 +13,15 @@ ROUNDS ?=
 # ships is run rather than described.
 test:
 	@mkdir -p build
-	$(CXX) $(CXXFLAGS) $(SAN) tests/test_ctsafe.cpp -o build/tests
-	./build/tests
-	$(CXX) $(CXXFLAGS) $(SAN) -DCTSAFE_PORTABLE tests/test_ctsafe.cpp -o build/tests-portable
-	./build/tests-portable
+	@for suite in $(SUITES); do \
+		name=`basename $$suite .cpp`; \
+		$(CXX) $(CXXFLAGS) $(SAN) $$suite -o build/$$name || exit 1; \
+		./build/$$name || exit 1; \
+		$(CXX) $(CXXFLAGS) $(SAN) -DCTSAFE_PORTABLE $$suite -o build/$$name-portable || exit 1; \
+		./build/$$name-portable || exit 1; \
+	done
 
-# The same suite at every optimisation level. An erasure that only survives at
+# The same suites at every optimisation level. An erasure that only survives at
 # -O0 is the bug this library exists to prevent, so -O2 and -O3 are part of the
 # check rather than something a user finds out later.
 #
@@ -26,12 +30,15 @@ matrix:
 	@mkdir -p build
 	@for level in $(OPT_LEVELS); do \
 		echo "ctsafe: tests at $$level"; \
-		$(CXX) $(CXXFLAGS) $$level tests/test_ctsafe.cpp -o build/tests$$level || exit 1; \
-		./build/tests$$level || exit 1; \
+		for suite in $(SUITES); do \
+			name=`basename $$suite .cpp`; \
+			$(CXX) $(CXXFLAGS) $$level $$suite -o build/$$name$$level || exit 1; \
+			./build/$$name$$level || exit 1; \
+		done; \
 		echo; \
 	done
 
-# What the suite above cannot see: a test reads the zeroes back, and a compiler
+# What the suites above cannot see: a test reads the zeroes back, and a compiler
 # may emit the store for the function that reads it while deleting it where
 # nothing does. This one reads the instructions.
 disasm:

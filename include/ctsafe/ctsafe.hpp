@@ -213,12 +213,16 @@ private:
     std::size_t size_ = 0;
 };
 
-/// Compare two buffers of the same length in time that does not depend on
-/// where — or whether — they differ.
+/// 0xFF when the two buffers are equal and 0x00 when they are not: the answer
+/// as a mask, so a caller staying branch-free is not handed a bool and left to
+/// turn it back into one.
 ///
 /// Both buffers must hold at least `length` bytes; nothing here can check that,
-/// which is why the span overload below exists.
-[[nodiscard]] inline bool equals(const void* left, const void* right, std::size_t length) noexcept {
+/// which is why the span overload below exists. Every byte is read before
+/// anything is decided, and the accumulated difference passes through the
+/// barrier before arithmetic turns it into the mask.
+[[nodiscard]] inline mask equals_mask(const void* left, const void* right,
+                                      std::size_t length) noexcept {
     const auto* a = static_cast<const std::uint8_t*>(left);
     const auto* b = static_cast<const std::uint8_t*>(right);
 
@@ -226,9 +230,58 @@ private:
     for (std::size_t i = 0; i < length; ++i) {
         difference = static_cast<std::uint8_t>(difference | (a[i] ^ b[i]));
     }
-    // Every byte was read before anything is decided.
     detail::keep(&difference);
-    return difference == 0;
+    // Zero spreads to 0xFF and anything else to 0x00 — eq()'s arithmetic, over
+    // the accumulator instead of over a single byte.
+    return static_cast<mask>((static_cast<std::uint16_t>(difference) - 1u) >> 8);
+}
+
+/// The same mask over two spans, which carry their own lengths. A size mismatch
+/// answers 0x00 before a byte is read, for the reason equals() answers false.
+[[nodiscard]] inline mask equals_mask(byte_view left, byte_view right) noexcept {
+    if (left.size() != right.size()) return 0x00;
+    return equals_mask(left.data(), right.data(), left.size());
+}
+
+/// 0xFF when left is numerically below right and 0x00 otherwise, over two
+/// equal-width big-endian magnitudes.
+///
+/// The bytes are subtracted least significant first and the borrow is carried
+/// from each byte into the next, so the borrow out of the top byte is the
+/// answer. The chain runs its full length whatever the values are: a difference
+/// in the last byte costs what a difference in the first one costs, which is
+/// the property a lexicographic compare does not have. The borrow passes
+/// through the barrier before it becomes a mask.
+///
+/// Equal width is the caller's, and there is no span overload for that reason:
+/// these are magnitudes rather than strings, so two different widths is a
+/// question about the widths, and an overload answering it would have to invent
+/// which side was padded.
+[[nodiscard]] inline mask less_than(const void* left, const void* right,
+                                    std::size_t length) noexcept {
+    const auto* a = static_cast<const std::uint8_t*>(left);
+    const auto* b = static_cast<const std::uint8_t*>(right);
+
+    std::uint16_t borrow = 0;
+    for (std::size_t i = length; i-- > 0;) {
+        const std::uint16_t difference = static_cast<std::uint16_t>(
+            static_cast<unsigned>(a[i]) - static_cast<unsigned>(b[i]) - borrow);
+        // The subtraction went below zero exactly when the top half of the
+        // 16-bit result is set, and that is what the next byte up owes.
+        borrow = static_cast<std::uint16_t>((difference >> 8) & 1u);
+    }
+    detail::keep(&borrow);
+    return static_cast<mask>(0u - static_cast<unsigned>(borrow));
+}
+
+/// Compare two buffers of the same length in time that does not depend on
+/// where — or whether — they differ.
+///
+/// equals_mask with the test moved to the one place a bool is wanted. Both
+/// buffers must hold at least `length` bytes; nothing here can check that,
+/// which is why the span overload below exists.
+[[nodiscard]] inline bool equals(const void* left, const void* right, std::size_t length) noexcept {
+    return equals_mask(left, right, length) != 0;
 }
 
 /// The same comparison over two spans, which carry their own lengths.

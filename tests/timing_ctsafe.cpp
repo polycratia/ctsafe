@@ -92,6 +92,25 @@ timing::result equals_first_vs_last_byte(const timing::config& cfg) {
     return timing::measure("equals: a difference in the first byte vs the last", cfg, prepare, run);
 }
 
+// The same split for the ordering, where it asks a harder question: a
+// difference in the last byte of a magnitude has to travel the whole borrow
+// chain, and a difference in the first byte travels none of it. A comparison
+// that stopped once the answer was known would separate these two classes.
+timing::result less_than_first_vs_last_byte(const timing::config& cfg) {
+    std::mt19937_64 setup(cfg.seed);
+    buffers data(setup, buffer_bytes);
+
+    auto prepare = [&data](std::mt19937_64&, int cls) {
+        data.differ_at(cls == 1 ? data.size() - 1 : 0, true);
+    };
+    auto run = [&data] {
+        const ctsafe::mask below = ctsafe::less_than(data.left(), data.right(), data.size());
+        sink = static_cast<std::uint8_t>(sink | below);
+    };
+    return timing::measure("less_than: a difference in the first byte vs the last", cfg, prepare,
+                           run);
+}
+
 timing::result is_zero_zero_vs_one_bit(const timing::config& cfg) {
     std::vector<std::uint8_t> buffer(buffer_bytes, 0);
     std::size_t dirty = 0;
@@ -159,6 +178,7 @@ int main(int argc, char** argv) {
     static const test_case cases[] = {
         {&equals_equal_vs_unequal, timing::expectation::no_difference},
         {&equals_first_vs_last_byte, timing::expectation::no_difference},
+        {&less_than_first_vs_last_byte, timing::expectation::no_difference},
         {&is_zero_zero_vs_one_bit, timing::expectation::no_difference},
         {&copy_if_mask_set_vs_clear, timing::expectation::no_difference},
         {&control_memcmp, timing::expectation::difference},
