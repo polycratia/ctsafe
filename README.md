@@ -47,11 +47,20 @@ if (ctsafe::equals(expected_tag, presented_tag)) { /* accept */ }
 // Or a pointer and a length, when that is what the caller has.
 if (ctsafe::equals(mac, expected, 16)) { /* accept */ }
 
-// Acting on the answer without branching on it: the mask decides which bytes
-// land, and the same stores happen either way.
-ctsafe::mask accepted = ctsafe::mask_from_bool(ctsafe::equals(expected_tag, presented_tag));
+// The answer as a mask instead of a bool, for a caller whose next step is
+// arithmetic: the mask decides which bytes land, and the same stores happen
+// whichever way it went.
+ctsafe::mask accepted = ctsafe::equals_mask(expected_tag, presented_tag);
 ctsafe::copy_if(accepted, session_key, derived_key, 32);
 ctsafe::select(accepted, out, derived_key, fallback_key, 32);
+
+// Ordering over two equal-width big-endian magnitudes, also 0xFF or 0x00.
+ctsafe::mask below = ctsafe::less_than(a, b, 32);
+ctsafe::select(below, smaller, a, b, 32);
+
+// And the bridge from a bool a caller already holds, when the condition came
+// from somewhere else entirely.
+ctsafe::copy_if(ctsafe::mask_from_bool(allowed), session_key, derived_key, 32);
 
 ctsafe::erase_object(session);     // size taken from the type, not retyped
 ctsafe::erase_backend_name();      // which routine that erase actually called
@@ -80,6 +89,19 @@ Header-only, C++17, no allocation, no exceptions.
 **The comparison reads every byte before deciding anything.** No branch depends
 on the contents, and the accumulated difference passes through a compiler
 barrier so the loop cannot be short-circuited.
+
+**The answer comes back as a mask, not only as a bool.** `equals_mask` and
+`less_than` return 0xFF or 0x00 by arithmetic over the barriered accumulator, so
+a caller staying branch-free is never handed a value whose only remaining use is
+a test. `equals` is `equals_mask` with that test moved to the one place a bool is
+wanted, so the two cannot disagree about an answer. `less_than` subtracts the two
+magnitudes least significant byte first and carries the borrow out of each byte
+into the next, so the borrow out of the top byte is the answer and the chain runs
+its full length whatever the values are — the property a lexicographic compare
+does not have. The widths must match and are the caller's, which is why there is
+no span overload for it: these are magnitudes rather than strings, so two
+different widths is a question about the widths, and an overload answering it
+would have to invent which side was padded.
 
 **The choice does not branch on the mask.** `select` and `copy_if` read both
 sides and write every byte of the destination whichever way the mask goes, so a
@@ -130,11 +152,12 @@ get, and the build `make test` runs second.
 layers, and only the first two are within reach of a portable header.
 
 **The source — decided here, and readable.** No branch and no memory address
-depends on a secret value. `equals` accumulates every byte and decides
-afterwards; `select` and `copy_if` are arithmetic over both sides; nothing here
-indexes a table with a secret, which is the shape that turns a cache into an
-oracle. This layer is settled by the code in front of you, and reading it is how
-you check it.
+depends on a secret value. `equals_mask` accumulates every byte and decides
+afterwards, `less_than` carries a borrow through all of them in the same order
+whatever they hold, `select` and `copy_if` are arithmetic over both sides, and
+nothing here indexes a table with a secret, which is the shape that turns a
+cache into an oracle. This layer is settled by the code in front of you, and
+reading it is how you check it.
 
 **The compiler — held at two named points.** Two rewrites undo the source:
 deleting a store to a buffer nothing reads again, and recognising a mask well
@@ -142,11 +165,11 @@ enough to replace the arithmetic with a branch around a `memcpy`. Both are
 blocked where they would happen — `detail::keep` after an erase or a comparison,
 `detail::hide` before a masked loop — and both are checked rather than asserted:
 `make disasm` reads the emitted erase, `make timing` puts a clock on the masked
-copy. Everything else a compiler may do is still permitted. Vectorising the
-loop, unrolling it, spilling the accumulator, reordering the two loads: none of
-those makes the work depend on the values, but nothing here verifies that for
-your compiler either. The instruction stream is the only authority, and the
-check in this repository reads it for `erase` alone.
+copy and on both comparisons. Everything else a compiler may do is still
+permitted. Vectorising the loop, unrolling it, spilling the accumulator,
+reordering the two loads: none of those makes the work depend on the values, but
+nothing here verifies that for your compiler either. The instruction stream is
+the only authority, and the check in this repository reads it for `erase` alone.
 
 **The CPU — out of reach, and no version of this header changes that.**
 
@@ -205,7 +228,7 @@ timing harness measures `memcmp`. A `memset` over a dead buffer is a store that
 *should* disappear, so a run where it did not is a run that would have reported
 the naive spelling as safe; it says it was blind and exits non-zero rather than
 passing. What the check covers is `erase`, on the build in front of you, at the
-levels in `OPT_LEVELS` — not the comparison, whose instruction stream still has
+levels in `OPT_LEVELS` — not the comparisons, whose instruction stream still has
 to be read by hand.
 
 ## Putting the timing claim on a clock
@@ -213,13 +236,14 @@ to be read by hand.
 `make timing` runs the routines past a statistical harness in the shape of
 dudect (Reparaz, Balasch and Verbauwhede, *dude, is my code constant time?*,
 2016). Each case times one operation over two classes of input — equal against
-one differing byte, a difference in the first byte against the last, all zero
-against a single set bit, a mask set against a mask clear — drawing the class at
-random before every measurement so that drift cannot line up with one class. The
-slow tail where the scheduler lives is cropped at a hundred percentiles, Welch's
-t-test is applied to each crop, and the largest `|t|` decides. Above 10 is a
-difference; the process exits non-zero, so an unattended run fails rather than
-printing a number nobody reads.
+one differing byte, a difference in the first byte against the last, the same
+split for `less_than` where the borrow chain has to run its full length either
+way, all zero against a single set bit, a mask set against a mask clear —
+drawing the class at random before every measurement so that drift cannot line
+up with one class. The slow tail where the scheduler lives is cropped at a
+hundred percentiles, Welch's t-test is applied to each crop, and the largest
+`|t|` decides. Above 10 is a difference; the process exits non-zero, so an
+unattended run fails rather than printing a number nobody reads.
 
 ```console
 $ make timing
@@ -231,11 +255,17 @@ equals: equal vs one differing byte
 
 ...
 
+less_than: a difference in the first byte vs the last
+  max |t| = 2.31 across 101 crops, 120000 measurements, 6 rounds
+  no difference at |t| > 10 - consistent with constant time
+
+...
+
 control - memcmp: equal vs a difference in the first byte
   max |t| = 148.02 across 101 crops, 20000 measurements, 1 rounds
   difference found, which is what this case is for
 
-ctsafe timing: 5 cases, 0 unexpected
+ctsafe timing: 6 cases, 0 unexpected
 ```
 
 The last case is the reason the others are worth reading. A harness that finds
@@ -267,16 +297,18 @@ a clock pointed at the result.
 
 **A mask is 0xFF or 0x00, and nothing else.** `select` and `copy_if` are
 arithmetic, not a test: handed 0x01 they mix the two sides bit by bit instead of
-rejecting it. Masks come from `eq` or `mask_from_bool`; a value invented
-elsewhere is a bug no amount of checking inside the loop could catch without
-branching on it.
+rejecting it. Masks come from `eq`, `equals_mask`, `less_than` or
+`mask_from_bool`; a value invented elsewhere is a bug no amount of checking
+inside the loop could catch without branching on it.
 
 **The length is not secret.** The span overload accepts anything with `data()`
 and `size()` — `std::array`, `std::vector`, `std::string`, a C array,
-`std::span` on C++20 — and answers `false` on a size mismatch before a byte is
-read. Buffers of different lengths are a structural error, not a guess to
-protect, and reading the shorter one past its end would be worse than the leak
-being avoided.
+`std::span` on C++20 — and answers `false` or 0x00 on a size mismatch before a
+byte is read. Buffers of different lengths are a structural error, not a guess
+to protect, and reading the shorter one past its end would be worse than the
+leak being avoided. `less_than` has no span overload at all: an ordering between
+two widths is a question about the widths, and the caller is the only one who
+knows which side was padded.
 
 **Erasing a buffer does not erase its copies.** No routine in the table above
 reaches a register spill, a block that `realloc` moved, or a page the kernel has
@@ -309,8 +341,8 @@ Small on purpose, and unlikely to grow much.
 
 | | |
 |---|---|
-| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming, a `CTSAFE_PORTABLE` build that forces every fallback row, a dudect-style timing harness with a known-leak control, a disassembly check that the erase is still in the instruction stream at `-O2` and `-O3` |
-| Not yet | constant-time integer comparison and conditional swap for bignum code, an owning buffer that allocates and erases |
+| Implemented | byte masks (`eq`, `select`, `mask_from_bool`), branch-free `select` and `copy_if` over buffers, constant-time `equals` over spans or a pointer and a length, mask-valued answers (`equals_mask`, and `less_than` over equal-width big-endian magnitudes) with `equals` rebuilt on top, `is_zero`, non-removable `erase` and `erase_object` over the platform's own secure-zero routine, a `secret_span` guard that erases on scope exit and refuses comparison and streaming, a `CTSAFE_PORTABLE` build that forces every fallback row, a dudect-style timing harness with a known-leak control, a disassembly check that the erase is still in the instruction stream at `-O2` and `-O3` |
+| Not yet | a constant-time conditional swap for bignum code, an owning buffer that allocates and erases |
 
 ## Development
 
