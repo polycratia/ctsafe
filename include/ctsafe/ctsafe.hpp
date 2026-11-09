@@ -185,6 +185,30 @@ inline void copy_if(mask m, void* destination, const void* source, std::size_t l
     select(m, destination, source, destination, length);
 }
 
+/// Exchange the two buffers when m is 0xFF, and rewrite both unchanged when it
+/// is 0x00 — the step a ladder takes once per bit of a secret exponent.
+///
+/// Both buffers must hold at least `length` bytes, and every one of those bytes
+/// is read and written whichever way the mask goes: the difference between two
+/// bytes is masked before it is folded back into both of them, so an exchange
+/// and a non-exchange are the same loads and the same stores, and only the
+/// values stored differ. Passing one buffer as both sides exchanges nothing,
+/// which is the only overlap allowed: two buffers that partially overlap would
+/// read bytes the loop has already rewritten.
+inline void swap_if(mask m, void* left, void* right, std::size_t length) noexcept {
+    auto* a = static_cast<std::uint8_t*>(left);
+    auto* b = static_cast<std::uint8_t*>(right);
+
+    const mask opaque = detail::hide(m);
+    for (std::size_t i = 0; i < length; ++i) {
+        const std::uint8_t exchange = static_cast<std::uint8_t>((a[i] ^ b[i]) & opaque);
+        a[i] = static_cast<std::uint8_t>(a[i] ^ exchange);
+        b[i] = static_cast<std::uint8_t>(b[i] ^ exchange);
+    }
+    detail::keep(left);
+    detail::keep(right);
+}
+
 /// A non-owning span of bytes: a pointer and a length that travel together.
 ///
 /// It converts from whatever the caller already has, so the length is read off
