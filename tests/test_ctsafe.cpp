@@ -114,6 +114,113 @@ void a_conditional_copy_of_nothing_is_allowed() {
     ctsafe::select(0xFF, nullptr, nullptr, nullptr, 0);
 }
 
+// The two outcomes of the ladder step, read back byte for byte rather than
+// through a comparison, because what has to hold is that every byte of both
+// buffers ended up where the mask says and nowhere else.
+void swap_if_exchanges_both_buffers_when_the_mask_is_set() {
+    const std::array<std::uint8_t, 8> left_before{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    const std::array<std::uint8_t, 8> right_before{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8};
+    auto left = left_before;
+    auto right = right_before;
+
+    ctsafe::swap_if(0xFF, left.data(), right.data(), left.size());
+
+    int wrong = 0;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        if (left[i] != right_before[i]) ++wrong;
+        if (right[i] != left_before[i]) ++wrong;
+    }
+    CHECK(wrong == 0);
+}
+
+void swap_if_leaves_both_buffers_alone_when_the_mask_is_clear() {
+    const std::array<std::uint8_t, 8> left_before{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    const std::array<std::uint8_t, 8> right_before{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8};
+    auto left = left_before;
+    auto right = right_before;
+
+    ctsafe::swap_if(0x00, left.data(), right.data(), left.size());
+
+    int wrong = 0;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        if (left[i] != left_before[i]) ++wrong;
+        if (right[i] != right_before[i]) ++wrong;
+    }
+    CHECK(wrong == 0);
+}
+
+// Exchanging twice is the identity, which is what a ladder relies on when it
+// has to undo a step it took on a bit it then reads differently.
+void swapping_twice_restores_both_buffers() {
+    std::array<std::uint8_t, 32> left{};
+    std::array<std::uint8_t, 32> right{};
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        left[i] = static_cast<std::uint8_t>(0x40 + i);
+        right[i] = static_cast<std::uint8_t>(0x80 ^ i);
+    }
+    const auto left_before = left;
+    const auto right_before = right;
+
+    ctsafe::swap_if(0xFF, left.data(), right.data(), left.size());
+    ctsafe::swap_if(0xFF, left.data(), right.data(), left.size());
+
+    CHECK(ctsafe::equals(left, left_before));
+    CHECK(ctsafe::equals(right, right_before));
+}
+
+// The mask comes from a comparison on secrets, and the exchange happens with no
+// bool in between for the compiler to branch on.
+void swap_if_takes_its_mask_from_a_comparison() {
+    std::array<std::uint8_t, 16> expected{};
+    expected.fill(0xA5);
+    auto presented = expected;
+
+    std::array<std::uint8_t, 8> live{};
+    live.fill(0x11);
+    std::array<std::uint8_t, 8> staged{};
+    staged.fill(0x22);
+
+    std::array<std::uint8_t, 8> ones{};
+    ones.fill(0x11);
+    std::array<std::uint8_t, 8> twos{};
+    twos.fill(0x22);
+
+    ctsafe::swap_if(ctsafe::mask_from_bool(ctsafe::equals(expected, presented)), live.data(),
+                    staged.data(), live.size());
+    CHECK(ctsafe::equals(live, twos));
+    CHECK(ctsafe::equals(staged, ones));
+
+    presented[0] ^= 0x01;
+    ctsafe::swap_if(ctsafe::mask_from_bool(ctsafe::equals(expected, presented)), live.data(),
+                    staged.data(), live.size());
+    CHECK(ctsafe::equals(live, twos));
+    CHECK(ctsafe::equals(staged, ones));
+}
+
+// One buffer on both sides exchanges nothing: each byte is folded with itself,
+// and that is the only overlap the loop allows.
+void swap_if_with_one_buffer_on_both_sides_changes_nothing() {
+    std::array<std::uint8_t, 4> buffer{0x11, 0x22, 0x33, 0x44};
+    const auto before = buffer;
+
+    ctsafe::swap_if(0xFF, buffer.data(), buffer.data(), buffer.size());
+    CHECK(ctsafe::equals(buffer, before));
+
+    ctsafe::swap_if(0x00, buffer.data(), buffer.data(), buffer.size());
+    CHECK(ctsafe::equals(buffer, before));
+}
+
+void a_conditional_swap_of_nothing_is_allowed() {
+    std::array<std::uint8_t, 1> left{0x11};
+    std::array<std::uint8_t, 1> right{0x22};
+
+    ctsafe::swap_if(0xFF, left.data(), right.data(), 0);
+    CHECK(left[0] == 0x11);  // zero length means zero bytes touched
+    CHECK(right[0] == 0x22);
+
+    ctsafe::swap_if(0xFF, nullptr, nullptr, 0);
+}
+
 void equals_agrees_with_memcmp_on_every_answer() {
     const std::string a = "the quick brown fox";
     const std::string b = "the quick brown fox";
@@ -395,6 +502,12 @@ int main() {
     copy_if_copies_only_when_the_mask_is_set();
     copy_if_takes_its_mask_from_a_comparison();
     a_conditional_copy_of_nothing_is_allowed();
+    swap_if_exchanges_both_buffers_when_the_mask_is_set();
+    swap_if_leaves_both_buffers_alone_when_the_mask_is_clear();
+    swapping_twice_restores_both_buffers();
+    swap_if_takes_its_mask_from_a_comparison();
+    swap_if_with_one_buffer_on_both_sides_changes_nothing();
+    a_conditional_swap_of_nothing_is_allowed();
     equals_agrees_with_memcmp_on_every_answer();
     equals_reads_the_whole_buffer_whatever_differs();
     equals_over_spans_takes_the_length_from_the_buffer();

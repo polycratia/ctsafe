@@ -146,6 +146,27 @@ timing::result copy_if_mask_set_vs_clear(const timing::config& cfg) {
     return timing::measure("copy_if: the mask set vs clear", cfg, prepare, run);
 }
 
+// The ladder step on the same clock. An exchange and a non-exchange are the
+// same loads and the same stores over both buffers, so the bit the mask came
+// from must not be readable in the time the step took.
+timing::result swap_if_mask_set_vs_clear(const timing::config& cfg) {
+    std::mt19937_64 setup(cfg.seed);
+    std::vector<std::uint8_t> left(buffer_bytes);
+    std::vector<std::uint8_t> right(buffer_bytes);
+    fill_random(setup, left);
+    fill_random(setup, right);
+    ctsafe::mask exchange = 0;
+
+    auto prepare = [&exchange](std::mt19937_64&, int cls) {
+        exchange = ctsafe::mask_from_bool(cls == 1);
+    };
+    auto run = [&exchange, &left, &right] {
+        ctsafe::swap_if(exchange, left.data(), right.data(), left.size());
+        sink = static_cast<std::uint8_t>(sink | left[0]);
+    };
+    return timing::measure("swap_if: the mask set vs clear", cfg, prepare, run);
+}
+
 // The control. A harness that finds nothing is either measuring a constant-time
 // routine or measuring nothing at all, and from outside the two look identical;
 // a leak of known size tells them apart.
@@ -181,6 +202,7 @@ int main(int argc, char** argv) {
         {&less_than_first_vs_last_byte, timing::expectation::no_difference},
         {&is_zero_zero_vs_one_bit, timing::expectation::no_difference},
         {&copy_if_mask_set_vs_clear, timing::expectation::no_difference},
+        {&swap_if_mask_set_vs_clear, timing::expectation::no_difference},
         {&control_memcmp, timing::expectation::difference},
     };
     const std::size_t count = sizeof cases / sizeof cases[0];
